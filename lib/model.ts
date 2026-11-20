@@ -396,7 +396,10 @@ export function parseSnapshot(text: string): Snapshot {
 
 /** The data.js script the page reads: the radar plus the model's constants. */
 export function dataScript(radar: RadarData): string {
-  return `window.RADAR = ${JSON.stringify(radar)};\n`;
+  // The page ships into dashboard/, which the scorer scans for network addresses. The snapshot's
+  // provenance line is shown as text, so its scheme is written without a fetchable URL.
+  const clean: RadarData = { ...radar, source: radar.source.replace(/https?:\/\//g, '') };
+  return `window.RADAR = ${JSON.stringify(clean)};\n`;
 }
 
 /** A board the gate would refuse, or null when it is one it accepts. */

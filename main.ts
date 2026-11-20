@@ -48,9 +48,11 @@ if (issue !== null) {
   process.exit(1);
 }
 
-mkdirSync(out, { recursive: true });
+mkdirSync(join(out, 'dashboard'), { recursive: true });
 writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
-writeFileSync(join(out, 'data.js'), dataScript(radar));
+const payload = dataScript(radar);
+writeFileSync(join(out, 'data.js'), payload);
+writeFileSync(join(out, 'dashboard', 'data.js'), payload);
 
 function copyFiles(from: string, to: string): string[] {
   if (!existsSync(from)) return [];
