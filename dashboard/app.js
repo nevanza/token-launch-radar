@@ -172,8 +172,10 @@
         return '<li><span class="n">' + (i + 1) + '</span><div><b>' + esc(s[0]) + '</b>' +
           '<span class="cost">' + esc(s[1]) + ' · ' + esc(s[2]) + '</span></div></li>';
       }).join('');
-      var mult = money(r.tvl_usd) + ' × 0.3 × growth ' + (r.growth_multiplier || 0).toFixed(3) +
-        ' × runway ' + (r.maturity_multiplier || 0).toFixed(3);
+      var m = r.multiple !== undefined ? {multiple: r.multiple, multiple_basis: r.multiple_basis, multiple_peers: r.multiple_peers, growth_multiplier: r.growth_multiplier, maturity_multiplier: r.maturity_multiplier} : {};
+      var mult = money(r.tvl_usd) + ' × ' + (m.multiple || 0).toFixed(3) +
+        ' × growth ' + (m.growth_multiplier || 0).toFixed(3) +
+        ' × runway ' + (m.maturity_multiplier || 0).toFixed(3);
       return '<div class="detail"><div class="dgrid">' +
         '<div><span class="k">Implied launch value</span><span class="v big">' + money(r.implied_value_usd) + '</span>' +
         '<span class="k2">' + esc(mult) + '</span></div>' +
@@ -181,6 +183,8 @@
         '<span class="k2">' + (r.change_7d === null ? 'no 7d print' : (r.change_7d > 0 ? '+' : '') + r.change_7d.toFixed(2) + '% over 7 days') + '</span></div>' +
         '<div><span class="k">Tracked</span><span class="v">' + ageTxt(r.age_days) + '</span>' +
         '<span class="k2">since ' + esc(r.listed_at || 'unknown') + '</span></div>' +
+        '<div><span class="k">Multiple source</span><span class="v">' + (m.multiple_basis === 'category' ? 'its category' : 'whole field') + '</span>' +
+        '<span class="k2">median market cap / TVL across ' + (m.multiple_peers || 0) + ' token-priced peers</span></div>' +
         '<div><span class="k">Confirmations</span><span class="v">' + conf(r.confidence) + '</span>' +
         '<span class="k2">' + Math.round((r.confidence || 0) * 100) + '% of this value rests on reported figures</span></div>' +
         '</div><h3>Farm plan before the launch</h3><ol class="steps">' + steps + '</ol></div>';

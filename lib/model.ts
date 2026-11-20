@@ -1,11 +1,15 @@
 // The token radar's model: one sealed snapshot in, one ranked board out.
 //
 // Design (radar-2):
-//  - Implied value is a function of the snapshot's own fields only: TVL, seven-day growth, and the
-//    days since DefiLlama began tracking the protocol. No protocol name is ever special-cased.
+//  - Implied value is a function of the snapshot's own fields only: TVL, seven-day growth, the
+//    days since DefiLlama began tracking the protocol, and the category's own measured multiple.
+//    No protocol name is ever special-cased.
 //  - The model is multiplicative and explainable in one line, so a reader can re-derive any row:
-//        implied = tvl x base_multiple x growth x runway
-//    base_multiple  what a launch is worth per dollar of current TVL
+//        implied = tvl x peer_multiple x growth x runway
+//    peer_multiple  the median mcap/tvl of already-tokenised protocols in the same category,
+//                   computed from this very snapshot (radar-3). Nothing here is a guessed
+//                   constant: each row records the multiple, whether it came from its category
+//                   or the whole field, and how many peers it was measured across.
 //    growth         rewards inflow, damped so a single outlier print cannot dominate the board
 //    runway         a protocol that has run longer without a token has had more time to build what
 //                   a token would price in; it saturates at three years
@@ -33,7 +37,10 @@ export interface Snapshot {
 }
 
 export interface ModelConstants {
-  base_multiple: number;
+  /** Fallback multiple when a category has too few token-priced peers to measure. */
+  fallback_multiple: number;
+  /** Minimum peers in a category before its own median is trusted. */
+  min_peers: number;
   growth_weight: number;
   growth_floor: number;
   growth_cap: number;
@@ -44,7 +51,10 @@ export interface ModelConstants {
 }
 
 export const MODEL: ModelConstants = {
-  base_multiple: 0.3,
+  // Overall median mcap/TVL across the 129 protocols in this snapshot that already
+  // trade a token, computed at run time; this constant is only the last resort.
+  fallback_multiple: 0.25,
+  min_peers: 5,
   growth_weight: 0.45,
   growth_floor: -50,
   growth_cap: 100,
@@ -54,7 +64,62 @@ export const MODEL: ModelConstants = {
   unknown_age_days: 400,
 };
 
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
+
+/**
+ * What a launch is worth per dollar of TVL, measured from the snapshot itself.
+ *
+ * Every protocol that already trades a token carries mcap_usd and tvl_usd, so the market's own
+ * answer to "what is a dollar of TVL worth in this category" is in the data. We take the median
+ * of mcap_usd / tvl_usd across the peers of the same category that have a token, and fall back to
+ * the median across all token-priced protocols when a category is too thin to measure.
+ *
+ * Nothing is invented: each multiple is a number a reader can recompute from the same snapshot,
+ * and the row records how many peers it came from.
+ */
+export interface PeerMultiple {
+  multiple: number;
+  peers: number;
+  basis: 'category' | 'field';
+}
+
+export function peerMultiples(
+  protocols: SnapshotProtocol[],
+  model: ModelConstants = MODEL,
+): { byCategory: Map<string, PeerMultiple>; field: PeerMultiple } {
+  const ratios = new Map<string, number[]>();
+  const all: number[] = [];
+  for (const p of protocols) {
+    if (p.mcap_usd === null || p.tvl_usd <= 0 || p.mcap_usd <= 0) continue;
+    const ratio = p.mcap_usd / p.tvl_usd;
+    if (!Number.isFinite(ratio) || ratio <= 0) continue;
+    all.push(ratio);
+    const key = p.category ?? 'uncategorised';
+    const list = ratios.get(key);
+    if (list === undefined) ratios.set(key, [ratio]);
+    else list.push(ratio);
+  }
+  const fieldRatio = median(all);
+  const field: PeerMultiple = {
+    multiple: fieldRatio > 0 ? fieldRatio : model.fallback_multiple,
+    peers: all.length,
+    basis: 'field',
+  };
+  const byCategory = new Map<string, PeerMultiple>();
+  for (const [key, list] of ratios) {
+    if (list.length >= model.min_peers) {
+      byCategory.set(key, { multiple: median(list), peers: list.length, basis: 'category' });
+    }
+  }
+  return { byCategory, field };
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
+}
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 72;
@@ -78,7 +143,9 @@ export interface BoardRow {
   age_days: number | null;
   implied_value_usd: number;
   model: {
-    base_multiple: number;
+    multiple: number;
+    multiple_basis: 'category' | 'field';
+    multiple_peers: number;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
@@ -101,6 +168,9 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
+  multiple: number;
+  multiple_basis: 'category' | 'field';
+  multiple_peers: number;
   growth_multiplier: number;
   maturity_multiplier: number;
   confidence: number;
@@ -155,7 +225,15 @@ export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
-): { implied: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null; confidence: number } {
+  peer: PeerMultiple,
+): {
+  implied: number;
+  growthPct: number;
+  growthMult: number;
+  maturityMult: number;
+  age: number | null;
+  confidence: number;
+} {
   const age = ageDays(asOf, protocol.listed_at);
   const reportedGrowth = protocol.change_7d !== null && Number.isFinite(protocol.change_7d);
   const rawGrowth = finite(protocol.change_7d, 0);
@@ -165,9 +243,13 @@ export function impliedValue(
   const maturityMult =
     model.maturity_floor +
     (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const base = protocol.tvl_usd * model.base_multiple;
+  const base = protocol.tvl_usd * peer.multiple;
   const implied = Math.max(1, Math.round(base * growthMult * maturityMult));
-  const confidence = (reportedGrowth ? 0.6 : 0.3) + (age !== null ? 0.4 : 0.15);
+  // A measured category multiple with many peers is the strongest input; a field-wide
+  // fallback with few peers is the weakest, and the row says so.
+  const measured = peer.basis === 'category' ? 0.5 : 0.25;
+  const depth = Math.min(1, peer.peers / 20) * 0.2;
+  const confidence = measured + depth + (reportedGrowth ? 0.15 : 0) + (age !== null ? 0.15 : 0.05);
   return { implied, growthPct, growthMult, maturityMult, age, confidence: Math.min(1, confidence) };
 }
 
@@ -199,7 +281,11 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     .slice(0, EARLY_ROWS);
   for (const p of early) chosen.set(p.slug, p);
 
-  const scored = [...chosen.values()].map((p) => ({ p, ...impliedValue(p, snapshot.as_of, model) }));
+  const peers = peerMultiples(snapshot.protocols, model);
+  const scored = [...chosen.values()].map((p) => {
+    const peer = peers.byCategory.get(p.category ?? 'uncategorised') ?? peers.field;
+    return { p, peer, ...impliedValue(p, snapshot.as_of, model, peer) };
+  });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
     rank: i + 1,
@@ -217,7 +303,9 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     age_days: s.age,
     implied_value_usd: s.implied,
     model: {
-      base_multiple: model.base_multiple,
+      multiple: round4(s.peer.multiple),
+      multiple_basis: s.peer.basis,
+      multiple_peers: s.peer.peers,
       growth_pct: round4(s.growthPct),
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
@@ -345,6 +433,9 @@ export function radarRow(row: BoardRow): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
+    multiple: row.model.multiple,
+    multiple_basis: row.model.multiple_basis,
+    multiple_peers: row.model.multiple_peers,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     confidence: row.confidence,
